@@ -8,6 +8,7 @@ package com.metrolist.music.network.flac.providers
 import android.util.Base64
 import com.metrolist.music.network.flac.FlacAudioQuality
 import com.metrolist.music.network.flac.FlacProvider
+import com.metrolist.music.network.flac.FlacRegistryManager
 import com.metrolist.music.network.flac.FlacStreamResult
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -41,7 +42,8 @@ class TidalFlacProvider(
         val cleanTrackId = trackId.trim()
         if (cleanTrackId.isEmpty()) return null
 
-        val endpoint = customBaseUrl?.takeIf { it.isNotBlank() }?.let { "$it/api/dl" } ?: COMMUNITY_ENDPOINT
+        val endpoint = customBaseUrl?.takeIf { it.isNotBlank() }?.let { if (it.endsWith("/api/dl")) it else "$it/api/dl" }
+            ?: FlacRegistryManager.getTidalEndpoint()
         val qualityCode = quality.toQualityCode()
 
         val jsonPayload = JSONObject().apply {

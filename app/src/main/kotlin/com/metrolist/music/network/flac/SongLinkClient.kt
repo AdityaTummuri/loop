@@ -43,7 +43,8 @@ class SongLinkClient(
     }
 
     fun resolveLinksForUrl(targetUrl: String, originalSpotifyId: String? = null): CrossPlatformLinks? {
-        val httpUrl = SONG_LINK_API.toHttpUrlOrNull()?.newBuilder()
+        val endpointUrl = FlacRegistryManager.getSongLinkEndpoint()
+        val httpUrl = endpointUrl.toHttpUrlOrNull()?.newBuilder()
             ?.addQueryParameter("url", targetUrl)
             ?.build() ?: return null
 
