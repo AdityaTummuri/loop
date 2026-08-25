@@ -1101,4 +1101,10 @@
     <string name="switch_to_list_view">Switch to list view</string>
     <string name="switch_to_grid_view">Switch to grid view</string>
     <string name="more_options">More options</string>
+
+    <!-- Lossless Extension Downloader -->
+    <string name="download_quality_title">Select Audio Quality</string>
+    <string name="download_quality_subtitle">Choose fidelity for offline playback</string>
+    <string name="download_started">Download queued: %s</string>
+    <string name="resolving_formats">Fetching audio formats…</string>
 </resources>
