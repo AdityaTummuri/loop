@@ -30,6 +30,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.webkit.URLUtil
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
@@ -447,6 +448,9 @@ class MusicService :
 
     // Flag to bypass cache when quality changes - forces fresh stream fetch
     private val bypassCacheForQualityChange = mutableSetOf<String>()
+
+    // Failed FLAC media IDs for session fallback to YouTube Music
+    private val failedFlacMediaIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     // In-memory negative cache for Qobuz: tracks that recently failed to resolve.
     // Without this, every playback of a YT-native track without a Qobuz match
@@ -2911,6 +2915,22 @@ class MusicService :
             .tag(TAG)
             .w(error, "Player error occurred for $mediaId: errorCode=${error.errorCode}, message=${error.message}")
 
+        // Check for HTTP 400 / 403 / BAD_HTTP_STATUS on FLAC streams and failover gracefully to YouTube Music
+        val httpException = error.cause as? HttpDataSource.InvalidResponseCodeException
+        val isHttp400OrBadStatus = error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
+            httpException?.responseCode == 400 ||
+            httpException?.responseCode == 403
+
+        if (isHttp400OrBadStatus && mediaId != null) {
+            android.util.Log.d("FlacStreamRepository", "FLAC URL returned 400, falling back to YouTube Music")
+            Timber.tag("FlacStreamRepository").w("FLAC URL returned 400 / HTTP %d, falling back to YouTube Music for: %s", httpException?.responseCode ?: -1, mediaId)
+            failedFlacMediaIds.add(mediaId)
+            FlacStreamRepository.invalidate(mediaId)
+            performAggressiveCacheClear(mediaId)
+            handleExpiredUrlError(mediaId)
+            return
+        }
+
         /*
          * error.message is always "Source error" and the code is often a re-classification, so
          * neither identifies the failure. The cause chain does: it carries the HTTP status, the
@@ -3544,7 +3564,7 @@ class MusicService :
                                                 .build()
                                         } ?: response.request
                                     }.build(),
-                            ),
+                            ).setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"),
                         ),
                     ),
             ).setCacheWriteDataSinkFactory(null)
@@ -3786,7 +3806,7 @@ class MusicService :
             // SpotiFLAC lossless attempt: when toggle is on, query FlacStreamRepository first.
             // Attempts to stream lossless FLAC from Tidal/Qobuz/Amazon before fallback.
             val flacStreamingEnabled = dataStore.get(EnableFlacStreamingKey, true)
-            if (flacStreamingEnabled) {
+            if (flacStreamingEnabled && !failedFlacMediaIds.contains(mediaId)) {
                 val flacQualityCode = dataStore.get(FlacAudioQualityPrefKey, "24")
                 val flacQuality = FlacAudioQuality.fromQualityCode(flacQualityCode)
                 val flacKey = FlacStreamRepository.cacheKey(mediaId, flacQuality)
@@ -3820,7 +3840,11 @@ class MusicService :
                         Timber.tag("FlacStreamRepo").d("FLAC stream resolution failed for %s: %s", mediaId, e.message)
                     }.getOrNull()
 
-                    if (flacResolved != null) {
+                    val flacUri = flacResolved?.mediaUri?.trim()
+                    val isValidFlacUrl = !flacUri.isNullOrBlank() &&
+                        (URLUtil.isValidUrl(flacUri) || flacUri.startsWith("http://") || flacUri.startsWith("https://"))
+
+                    if (flacResolved != null && isValidFlacUrl) {
                         Timber.tag("FlacStreamRepo").i(
                             "Routing lossless stream to ExoPlayer: %s (%s, %dbps)",
                             mediaId, flacResolved.label, flacResolved.bitrate
@@ -3845,9 +3869,11 @@ class MusicService :
                         }
                         return@Factory dataSpec
                             .buildUpon()
-                            .setUri(flacResolved.mediaUri.toUri())
+                            .setUri(flacUri!!.toUri())
                             .setKey(flacKey)
                             .build()
+                    } else if (flacResolved != null) {
+                        Timber.tag("FlacStreamRepo").w("Invalid FLAC stream URL for %s: %s", mediaId, flacUri)
                     }
                 }
             }
