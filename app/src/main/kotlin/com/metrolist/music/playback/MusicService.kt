@@ -656,7 +656,7 @@ class MusicService :
 
         audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
 
-        audioQuality = dataStore.get(AudioQualityKey).toEnum(com.metrolist.music.constants.AudioQuality.AUTO)
+        audioQuality = dataStore.get(AudioQualityKey).toEnum(com.metrolist.music.constants.AudioQuality.HIGH)
         playerVolume = MutableStateFlow(dataStore.get(PlayerVolumeKey, 1f).coerceIn(0f, 1f))
 
         // Initialize Google Cast
@@ -3815,81 +3815,6 @@ class MusicService :
 
             // Check if we need to bypass cache for quality change
             val shouldBypassCache = bypassCacheForQualityChange.contains(mediaId)
-
-            // SpotiFLAC lossless attempt: when toggle is on, query FlacStreamRepository first.
-            // Attempts to stream lossless FLAC from Tidal/Qobuz/Amazon before fallback.
-            val flacStreamingEnabled = dataStore.get(EnableFlacStreamingKey, true)
-            if (flacStreamingEnabled && !failedFlacMediaIds.contains(mediaId)) {
-                val flacQualityCode = dataStore.get(FlacAudioQualityPrefKey, "24")
-                val flacQuality = FlacAudioQuality.fromQualityCode(flacQualityCode)
-                val flacKey = FlacStreamRepository.cacheKey(mediaId, flacQuality)
-                val usePlayerCache = dataStore.get(EnableSongCacheKey, true)
-
-                if (!shouldBypassCache &&
-                    (downloadCache.isCached(flacKey, dataSpec.position,
-                        if (dataSpec.length >= 0) dataSpec.length else 1) ||
-                        (usePlayerCache && playerCache.isCached(flacKey, dataSpec.position, CHUNK_LENGTH)))
-                ) {
-                    return@Factory dataSpec.buildUpon().setKey(flacKey).build()
-                }
-
-                val spotifyTrack = SpotifyMetadataRegistry.get(mediaId)
-                val dbSong = runBlocking(Dispatchers.IO) { database.getSongById(mediaId) }
-                val flacQuery = buildFlacTrackQuery(mediaId, spotifyTrack, dbSong, flacQuality)
-
-                if (flacQuery != null) {
-                    val trackTitle = flacQuery.title
-                    val trackArtist = flacQuery.artists.firstOrNull() ?: ""
-                    android.util.Log.d("FlacStreamRepository", "Resolving FLAC stream for: $trackTitle by $trackArtist")
-                    Timber.tag("MusicService").i("Resolving FLAC stream for: %s by %s", trackTitle, trackArtist)
-
-                    val flacResolved = runCatching {
-                        runBlocking(Dispatchers.IO) {
-                            withTimeoutOrNull(2000L) {
-                                FlacStreamRepository.resolveFlacStream(flacQuery)
-                            }
-                        }
-                    }.onFailure { e ->
-                        Timber.tag("FlacStreamRepo").d("FLAC stream resolution failed for %s: %s", mediaId, e.message)
-                    }.getOrNull()
-
-                    val flacUri = flacResolved?.mediaUri?.trim()
-                    val isValidFlacUrl = !flacUri.isNullOrBlank() &&
-                        (URLUtil.isValidUrl(flacUri) || flacUri.startsWith("http://") || flacUri.startsWith("https://"))
-
-                    if (flacResolved != null && isValidFlacUrl) {
-                        Timber.tag("FlacStreamRepo").i(
-                            "Routing lossless stream to ExoPlayer: %s (%s, %dbps)",
-                            mediaId, flacResolved.label, flacResolved.bitrate
-                        )
-                        scope.launch(Dispatchers.IO) {
-                            database.query {
-                                upsert(
-                                    FormatEntity(
-                                        id = mediaId,
-                                        itag = if (flacResolved.bitDepth == 24) 9924 else 9916,
-                                        mimeType = flacResolved.mimeType,
-                                        codecs = "flac",
-                                        bitrate = flacResolved.bitrate,
-                                        sampleRate = flacResolved.sampleRate ?: 96000,
-                                        contentLength = 0L,
-                                        loudnessDb = null,
-                                        perceptualLoudnessDb = null,
-                                        playbackUrl = null,
-                                    )
-                                )
-                            }
-                        }
-                        return@Factory dataSpec
-                            .buildUpon()
-                            .setUri(flacUri!!.toUri())
-                            .setKey(flacKey)
-                            .build()
-                    } else if (flacResolved != null) {
-                        Timber.tag("FlacStreamRepo").w("Invalid FLAC stream URL for %s: %s", mediaId, flacUri)
-                    }
-                }
-            }
 
             // Qobuz lossless attempt: when toggle is on, try Qobuz for every track.
             // Uses Spotify metadata (with ISRC) when available — registered by
