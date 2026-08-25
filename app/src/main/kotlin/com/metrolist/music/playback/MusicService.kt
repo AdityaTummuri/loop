@@ -3693,27 +3693,40 @@ class MusicService :
         dbSong: Song?,
         quality: FlacAudioQuality,
     ): FlacTrackQuery? {
-        val currentItem = player.currentMediaItem?.takeIf { it.mediaId == mediaId }
-            ?: player.findNextMediaItemById(mediaId)
-        val mediaMetadata = currentItem?.mediaMetadata
+        val cachedMetadata = currentMediaMetadata.value?.takeIf { it.id == mediaId }
+
+        val mainThreadItem = if (cachedMetadata == null) {
+            runCatching {
+                runBlocking(Dispatchers.Main) {
+                    player.currentMediaItem?.takeIf { it.mediaId == mediaId }
+                        ?: player.findNextMediaItemById(mediaId)
+                }
+            }.getOrNull()
+        } else null
+
+        val mediaMetadata = mainThreadItem?.mediaMetadata
 
         val title = spotifyTrack?.name
+            ?: cachedMetadata?.title
             ?: mediaMetadata?.title?.toString()
             ?: dbSong?.song?.title
             ?: return null
 
         val artists = spotifyTrack?.artists?.map { it.name }?.takeIf { it.isNotEmpty() }
+            ?: cachedMetadata?.artists?.map { it.name }?.takeIf { it.isNotEmpty() }
             ?: mediaMetadata?.artist?.toString()?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
             ?: dbSong?.artists?.map { it.name }?.takeIf { it.isNotEmpty() }
             ?: emptyList()
         if (artists.isEmpty()) return null
 
         val album = spotifyTrack?.album?.name
+            ?: cachedMetadata?.album?.title
             ?: mediaMetadata?.albumTitle?.toString()
             ?: dbSong?.song?.albumName
             ?: dbSong?.album?.title
 
         val durationMs = spotifyTrack?.durationMs?.takeIf { it > 0 }?.toLong()
+            ?: cachedMetadata?.duration?.takeIf { it > 0 }?.toLong()?.times(1000L)
             ?: dbSong?.song?.duration?.takeIf { it > 0 }?.toLong()?.times(1000L)
 
         val isrc = spotifyTrack?.isrc?.takeIf { it.isNotBlank() }
