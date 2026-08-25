@@ -62,6 +62,7 @@ import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.audio.AudioCapabilities
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.analytics.PlaybackStats
@@ -89,7 +90,9 @@ import com.metrolist.music.constants.AudioFocusEnabledKey
 import com.metrolist.music.constants.AudioNormalizationKey
 import com.metrolist.music.constants.AudioOffload
 import com.metrolist.music.constants.AudioQualityKey
+import com.metrolist.music.constants.EnableFlacStreamingKey
 import com.metrolist.music.constants.EnableQobuzKey
+import com.metrolist.music.constants.FlacAudioQualityPrefKey
 import com.metrolist.music.constants.QobuzAudioQuality
 import com.metrolist.music.constants.QobuzAudioQualityKey
 import com.metrolist.music.constants.QobuzBackend
@@ -100,6 +103,9 @@ import com.metrolist.music.constants.QobuzKennyEndpointKey
 import com.metrolist.music.constants.QobuzMatchOverridesKey
 import com.metrolist.music.constants.QobuzSquidEndpointKey
 import com.metrolist.music.constants.QobuzTryptEndpointKey
+import com.metrolist.music.network.flac.FlacAudioQuality
+import com.metrolist.music.network.flac.FlacStreamRepository
+import com.metrolist.music.network.flac.FlacTrackQuery
 import com.metrolist.music.qobuz.QobuzAudioProvider
 import com.metrolist.music.qobuz.QobuzMatchOverride
 import com.metrolist.music.qobuz.QobuzMatchOverrides
@@ -242,6 +248,7 @@ import kotlinx.coroutines.plus
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.TimeoutCancellationException
 import okhttp3.OkHttpClient
 import timber.log.Timber
@@ -500,6 +507,17 @@ class MusicService :
                         it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
                             it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
                     } == true
+
+                val hasUsbDac =
+                    addedDevices?.any {
+                        it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
+                            it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_USB_ACCESSORY
+                    } == true
+
+                if (hasUsbDac) {
+                    Timber.tag(TAG).i("USB DAC / External audio interface connected - bit-perfect direct offload active")
+                }
 
                 if (hasBluetooth) {
                     if (dataStore.get(ResumeOnBluetoothConnectKey, false)) {
@@ -1180,6 +1198,7 @@ class MusicService :
                         .Builder()
                         .setUsage(C.USAGE_MEDIA)
                         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                        .setSpatializationBehavior(C.SPATIALIZATION_BEHAVIOR_NEVER)
                         .build(),
                     false,
                 ).setSeekBackIncrementMs(5000)
@@ -3641,9 +3660,47 @@ class MusicService :
         "qobuz:$qualityCode:$mediaId"
 
     private fun stripQobuzCacheKeyPrefix(key: String): String {
-        if (!key.startsWith("qobuz:")) return key
-        val parts = key.split(":", limit = 3)
-        return if (parts.size == 3) parts[2] else key
+        if (key.startsWith("qobuz:") || key.startsWith("flac:")) {
+            val parts = key.split(":", limit = 3)
+            return if (parts.size == 3) parts[2] else key
+        }
+        return key
+    }
+
+    private fun buildFlacTrackQuery(
+        mediaId: String,
+        spotifyTrack: SpotifyTrack?,
+        dbSong: Song?,
+        quality: FlacAudioQuality,
+    ): FlacTrackQuery? {
+        val title = spotifyTrack?.name
+            ?: dbSong?.song?.title
+            ?: return null
+        val artists = spotifyTrack?.artists?.map { it.name }
+            ?.takeIf { it.isNotEmpty() }
+            ?: dbSong?.artists?.map { it.name }?.takeIf { it.isNotEmpty() }
+            ?: emptyList()
+        if (artists.isEmpty()) return null
+        val album = spotifyTrack?.album?.name
+            ?: dbSong?.song?.albumName
+            ?: dbSong?.album?.title
+        val durationMs = spotifyTrack?.durationMs?.takeIf { it > 0 }?.toLong()
+            ?: dbSong?.song?.duration?.takeIf { it > 0 }?.toLong()?.times(1000L)
+        val isrc = spotifyTrack?.isrc?.takeIf { it.isNotBlank() }
+            ?: dbSong?.song?.isrc?.takeIf { it.isNotBlank() }
+        val spotifyTrackId = spotifyTrack?.id
+            ?: if (mediaId.startsWith("spotify:")) mediaId.removePrefix("spotify:") else null
+
+        return FlacTrackQuery(
+            mediaId = mediaId,
+            title = title,
+            artists = artists,
+            album = album,
+            isrc = isrc,
+            spotifyTrackId = spotifyTrackId,
+            durationMs = durationMs,
+            quality = quality,
+        )
     }
 
     private fun buildQobuzQuery(
@@ -3714,6 +3771,70 @@ class MusicService :
 
             // Check if we need to bypass cache for quality change
             val shouldBypassCache = bypassCacheForQualityChange.contains(mediaId)
+
+            // SpotiFLAC lossless attempt: when toggle is on, query FlacStreamRepository first.
+            // Attempts to stream lossless FLAC from Tidal/Qobuz/Amazon before fallback.
+            val flacStreamingEnabled = dataStore.get(EnableFlacStreamingKey, true)
+            if (flacStreamingEnabled) {
+                val flacQualityCode = dataStore.get(FlacAudioQualityPrefKey, "24")
+                val flacQuality = FlacAudioQuality.fromQualityCode(flacQualityCode)
+                val flacKey = FlacStreamRepository.cacheKey(mediaId, flacQuality)
+                val usePlayerCache = dataStore.get(EnableSongCacheKey, true)
+
+                if (!shouldBypassCache &&
+                    (downloadCache.isCached(flacKey, dataSpec.position,
+                        if (dataSpec.length >= 0) dataSpec.length else 1) ||
+                        (usePlayerCache && playerCache.isCached(flacKey, dataSpec.position, CHUNK_LENGTH)))
+                ) {
+                    return@Factory dataSpec.buildUpon().setKey(flacKey).build()
+                }
+
+                val spotifyTrack = SpotifyMetadataRegistry.get(mediaId)
+                val dbSong = runBlocking(Dispatchers.IO) { database.getSongById(mediaId) }
+                val flacQuery = buildFlacTrackQuery(mediaId, spotifyTrack, dbSong, flacQuality)
+
+                if (flacQuery != null) {
+                    val flacResolved = runCatching {
+                        runBlocking(Dispatchers.IO) {
+                            withTimeoutOrNull(2000L) {
+                                FlacStreamRepository.resolveFlacStream(flacQuery)
+                            }
+                        }
+                    }.onFailure { e ->
+                        Timber.tag("FlacStreamRepo").d("FLAC stream resolution failed for %s: %s", mediaId, e.message)
+                    }.getOrNull()
+
+                    if (flacResolved != null) {
+                        Timber.tag("FlacStreamRepo").i(
+                            "Routing lossless stream to ExoPlayer: %s (%s, %dbps)",
+                            mediaId, flacResolved.label, flacResolved.bitrate
+                        )
+                        scope.launch(Dispatchers.IO) {
+                            database.query {
+                                upsert(
+                                    FormatEntity(
+                                        id = mediaId,
+                                        itag = if (flacResolved.bitDepth == 24) 9924 else 9916,
+                                        mimeType = flacResolved.mimeType,
+                                        codecs = "flac",
+                                        bitrate = flacResolved.bitrate,
+                                        sampleRate = flacResolved.sampleRate ?: 96000,
+                                        contentLength = 0L,
+                                        loudnessDb = null,
+                                        perceptualLoudnessDb = null,
+                                        playbackUrl = null,
+                                    )
+                                )
+                            }
+                        }
+                        return@Factory dataSpec
+                            .buildUpon()
+                            .setUri(flacResolved.mediaUri.toUri())
+                            .setKey(flacKey)
+                            .build()
+                    }
+                }
+            }
 
             // Qobuz lossless attempt: when toggle is on, try Qobuz for every track.
             // Uses Spotify metadata (with ISRC) when available — registered by
@@ -4093,7 +4214,8 @@ class MusicService :
             enableAudioTrackPlaybackParams: Boolean,
         ) = DefaultAudioSink
             .Builder(this@MusicService)
-            .setEnableFloatOutput(enableFloatOutput)
+            .setAudioCapabilities(AudioCapabilities.getCapabilities(context))
+            .setEnableFloatOutput(true)
             .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
             .setAudioProcessorChain(
                 DefaultAudioSink.DefaultAudioProcessorChain(
