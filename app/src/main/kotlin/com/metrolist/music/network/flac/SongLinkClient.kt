@@ -42,6 +42,103 @@ class SongLinkClient(
         return resolveLinksForUrl(spotifyUrl, cleanTrackId)
     }
 
+    fun resolveLinksByTrackInfo(title: String, artist: String, album: String? = null): CrossPlatformLinks? {
+        val cleanTitle = title.trim()
+        val cleanArtist = artist.trim()
+        if (cleanTitle.isEmpty() || cleanArtist.isEmpty()) return null
+
+        Timber.tag(TAG).d("Searching SongLink for '%s' by '%s'...", cleanTitle, cleanArtist)
+
+        // Strategy 1: Search via iTunes Search API (fast, open, reliable cross-platform bridge for SongLink)
+        try {
+            val query = "$cleanArtist $cleanTitle"
+            val itunesUrl = "https://itunes.apple.com/search".toHttpUrlOrNull()?.newBuilder()
+                ?.addQueryParameter("term", query)
+                ?.addQueryParameter("media", "music")
+                ?.addQueryParameter("entity", "song")
+                ?.addQueryParameter("limit", "1")
+                ?.build()
+
+            if (itunesUrl != null) {
+                val req = Request.Builder()
+                    .url(itunesUrl)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "application/json")
+                    .build()
+
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()
+                        if (!body.isNullOrBlank()) {
+                            val itunesJson = JSONObject(body)
+                            val results = itunesJson.optJSONArray("results")
+                            if (results != null && results.length() > 0) {
+                                val trackObj = results.getJSONObject(0)
+                                val trackViewUrl = trackObj.optString("trackViewUrl")
+                                if (trackViewUrl.isNotBlank()) {
+                                    val links = resolveLinksForUrl(trackViewUrl)
+                                    if (links != null && (links.hasTidal || links.hasQobuz || links.hasAmazon || links.hasDeezer)) {
+                                        Timber.tag(TAG).i("Matched track to Tidal ID / ISRC: %s / %s", links.tidalTrackId ?: "none", links.isrc ?: "none")
+                                        android.util.Log.d(TAG, "Matched track to Tidal ID / ISRC: ${links.tidalTrackId ?: "none"} / ${links.isrc ?: "none"}")
+                                        return links
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Timber.tag(TAG).d(e, "iTunes bridge search failed for %s - %s", cleanArtist, cleanTitle)
+        }
+
+        // Strategy 2: Search via Deezer Search API
+        try {
+            val query = "$cleanArtist $cleanTitle"
+            val deezerSearchUrl = "https://api.deezer.com/search".toHttpUrlOrNull()?.newBuilder()
+                ?.addQueryParameter("q", query)
+                ?.addQueryParameter("limit", "1")
+                ?.build()
+
+            if (deezerSearchUrl != null) {
+                val req = Request.Builder()
+                    .url(deezerSearchUrl)
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "application/json")
+                    .build()
+
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()
+                        if (!body.isNullOrBlank()) {
+                            val json = JSONObject(body)
+                            val data = json.optJSONArray("data")
+                            if (data != null && data.length() > 0) {
+                                val item = data.getJSONObject(0)
+                                val link = item.optString("link")
+                                val isrc = item.optString("isrc").takeIf { it.isNotBlank() }
+
+                                if (link.isNotBlank()) {
+                                    val links = resolveLinksForUrl(link)
+                                    if (links != null) {
+                                        val enriched = if (links.isrc == null && isrc != null) links.copy(isrc = isrc) else links
+                                        Timber.tag(TAG).i("Matched track to Tidal ID / ISRC: %s / %s", enriched.tidalTrackId ?: "none", enriched.isrc ?: "none")
+                                        android.util.Log.d(TAG, "Matched track to Tidal ID / ISRC: ${enriched.tidalTrackId ?: "none"} / ${enriched.isrc ?: "none"}")
+                                        return enriched
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Timber.tag(TAG).d(e, "Deezer search failed for %s - %s", cleanArtist, cleanTitle)
+        }
+
+        return null
+    }
+
     fun resolveLinksForUrl(targetUrl: String, originalSpotifyId: String? = null): CrossPlatformLinks? {
         val endpointUrl = FlacRegistryManager.getSongLinkEndpoint()
         val httpUrl = endpointUrl.toHttpUrlOrNull()?.newBuilder()

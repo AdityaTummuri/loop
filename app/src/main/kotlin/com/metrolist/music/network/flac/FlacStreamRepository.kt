@@ -106,8 +106,9 @@ object FlacStreamRepository {
 
         // 5. Cache result or persist catalog miss
         if (resolvedStream != null) {
-            Timber.tag(TAG).i("FLAC Stream RESOLVED ✔ for %s from %s (%s)",
+            Timber.tag(TAG).i("Successfully hijacked stream with FLAC source: %s (%s, %s)",
                 query.mediaId, resolvedStream.provider.displayName, resolvedStream.label)
+            android.util.Log.d(TAG, "Successfully hijacked stream with FLAC source: ${query.mediaId} (${resolvedStream.provider.displayName})")
             streamCache[cacheKey] = resolvedStream
             missUntilMs.remove(query.mediaId)
             return resolvedStream
@@ -122,10 +123,20 @@ object FlacStreamRepository {
         linksCache[query.mediaId]?.let { return it }
 
         val spotifyId = query.spotifyTrackId
-        val links = if (!spotifyId.isNullOrBlank()) {
+        var links = if (!spotifyId.isNullOrBlank()) {
             songLinkClient.resolveLinksForSpotifyTrack(spotifyId)
         } else {
             null
+        }
+
+        // Fall back to title + artist track search if direct Spotify ID was missing or unresolved
+        if (links == null && query.title.isNotBlank() && query.artists.isNotEmpty()) {
+            val primaryArtist = query.artists.first()
+            links = songLinkClient.resolveLinksByTrackInfo(
+                title = query.title,
+                artist = primaryArtist,
+                album = query.album,
+            )
         }
 
         if (links != null) {

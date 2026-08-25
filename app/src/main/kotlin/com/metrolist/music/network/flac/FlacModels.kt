@@ -39,7 +39,13 @@ data class CrossPlatformLinks(
     val qobuzUrl: String? = null,
     val deezerTrackId: String? = null,
     val deezerUrl: String? = null,
-)
+) {
+    val hasTidal: Boolean get() = !tidalTrackId.isNullOrBlank() || !tidalUrl.isNullOrBlank()
+    val hasAmazon: Boolean get() = !amazonAsin.isNullOrBlank() || !amazonUrl.isNullOrBlank()
+    val hasQobuz: Boolean get() = !qobuzTrackId.isNullOrBlank() || !qobuzUrl.isNullOrBlank()
+    val hasDeezer: Boolean get() = !deezerTrackId.isNullOrBlank() || !deezerUrl.isNullOrBlank()
+    val hasAny: Boolean get() = hasTidal || hasAmazon || hasQobuz || hasDeezer || !isrc.isNullOrBlank()
+}
 
 data class FlacTrackQuery(
     val mediaId: String,

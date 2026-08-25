@@ -3673,21 +3673,32 @@ class MusicService :
         dbSong: Song?,
         quality: FlacAudioQuality,
     ): FlacTrackQuery? {
+        val currentItem = player.currentMediaItem?.takeIf { it.mediaId == mediaId }
+            ?: player.findNextMediaItemById(mediaId)
+        val mediaMetadata = currentItem?.mediaMetadata
+
         val title = spotifyTrack?.name
+            ?: mediaMetadata?.title?.toString()
             ?: dbSong?.song?.title
             ?: return null
-        val artists = spotifyTrack?.artists?.map { it.name }
-            ?.takeIf { it.isNotEmpty() }
+
+        val artists = spotifyTrack?.artists?.map { it.name }?.takeIf { it.isNotEmpty() }
+            ?: mediaMetadata?.artist?.toString()?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
             ?: dbSong?.artists?.map { it.name }?.takeIf { it.isNotEmpty() }
             ?: emptyList()
         if (artists.isEmpty()) return null
+
         val album = spotifyTrack?.album?.name
+            ?: mediaMetadata?.albumTitle?.toString()
             ?: dbSong?.song?.albumName
             ?: dbSong?.album?.title
+
         val durationMs = spotifyTrack?.durationMs?.takeIf { it > 0 }?.toLong()
             ?: dbSong?.song?.duration?.takeIf { it > 0 }?.toLong()?.times(1000L)
+
         val isrc = spotifyTrack?.isrc?.takeIf { it.isNotBlank() }
             ?: dbSong?.song?.isrc?.takeIf { it.isNotBlank() }
+
         val spotifyTrackId = spotifyTrack?.id
             ?: if (mediaId.startsWith("spotify:")) mediaId.removePrefix("spotify:") else null
 
@@ -3794,6 +3805,11 @@ class MusicService :
                 val flacQuery = buildFlacTrackQuery(mediaId, spotifyTrack, dbSong, flacQuality)
 
                 if (flacQuery != null) {
+                    val trackTitle = flacQuery.title
+                    val trackArtist = flacQuery.artists.firstOrNull() ?: ""
+                    android.util.Log.d("FlacStreamRepository", "Resolving FLAC stream for: $trackTitle by $trackArtist")
+                    Timber.tag("MusicService").i("Resolving FLAC stream for: %s by %s", trackTitle, trackArtist)
+
                     val flacResolved = runCatching {
                         runBlocking(Dispatchers.IO) {
                             withTimeoutOrNull(2000L) {
